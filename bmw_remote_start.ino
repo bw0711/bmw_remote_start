@@ -3,13 +3,12 @@
 #include <SPI.h>
 
 // ===== EXTERNAL AUTO-START TRIGGER CONFIGURATION =====
-// CAN ID for external auto-start trigger (e.g., aftermarket alarm/GSM module)
+// CAN ID for external auto-start trigger (BMW app heater command)
 #define CAN_ID_AUTOSTART_TRIGGER 0x3B3
-#define CAN_DLC_AUTOSTART_TRIGGER 7
 
-// Expected payload for auto-start trigger: "3B3 7 0F 00 00 00 00 F0 F8"
-const uint8_t AUTOSTART_TRIGGER_PAYLOAD[] = {0x0F, 0x00, 0x00, 0x00, 0x00, 0xF0, 0xF8};
-const uint8_t AUTOSTART_TRIGGER_PAYLOAD_LEN = 7;
+// Trigger byte: byte 0 = 0x0F indicates heater START command
+// (byte 0 = 0x1F is normal status, we ignore that)
+#define AUTOSTART_TRIGGER_BYTE0 0x0F
 
 // Debounce: minimum time between trigger activations (ms)
 #define AUTOSTART_TRIGGER_DEBOUNCE_MS 5000
@@ -71,22 +70,12 @@ MCP2515 mcp2515(10);
  * 0x23A : data: xx F3 00 3F ->  key button released
  * 
  * ENGINE STATUS
- * 0x0A5 : data: Byte[5] = 0x00 and Byte[5] = 0x00 -> if engine is NOT running
+ * 0x0A5 : data: Byte[5] = 0x00 and Byte[6] = 0x00 -> if engine is NOT running
  * 
- * EXTERNAL AUTO-START TRIGGER
- * 0x3B3 : data: 0F 00 00 00 00 F0 F8 -> external auto-start command
+ * BMW APP HEATER COMMAND
+ * 0x3B3 : data: Byte[0] = 0x0F -> heater START command from BMW app
+ * 0x3B3 : data: Byte[0] = 0x1F -> normal status (ignored)
  */
-
-// Helper function to compare CAN payload bytes
-bool can_payload_matches(const uint8_t* received, const uint8_t* expected, uint8_t len)
-{
-  for(uint8_t i = 0; i < len; i++)
-  {
-    if(received[i] != expected[i])
-      return false;
-  }
-  return true;
-}
 
 
 void can_updateStatus()
@@ -147,7 +136,7 @@ void can_updateStatus()
     {
       //engine running status
       if((canMsg.data[5] == 0x00 &&
-          canMsg.data[6] == 0x00)) //data: Byte[5] = 0x00 and Byte[5] = 0x00 -> if engine is NOT running
+          canMsg.data[6] == 0x00)) //data: Byte[5] = 0x00 and Byte[6] = 0x00 -> if engine is NOT running
        {
          //Serial.println("Engine is NOT running"); 
          status_engine_running = false;
@@ -163,35 +152,32 @@ void can_updateStatus()
          status_engine_running = true;
        }
     }
-    else if(canMsg.can_id == CAN_ID_AUTOSTART_TRIGGER)  //can id for external auto-start trigger
+    else if(canMsg.can_id == CAN_ID_AUTOSTART_TRIGGER)  //can id for BMW app heater command
     {
-      // Check DLC matches expected length
-      if(canMsg.can_dlc == CAN_DLC_AUTOSTART_TRIGGER)
+      // Check byte 0 = 0x0F (heater START command from BMW app)
+      // Note: byte 0 = 0x1F is normal status/heartbeat, we ignore that
+      if(canMsg.data[0] == AUTOSTART_TRIGGER_BYTE0)
       {
-        // Check full payload match
-        if(can_payload_matches(canMsg.data, AUTOSTART_TRIGGER_PAYLOAD, AUTOSTART_TRIGGER_PAYLOAD_LEN))
+        // Debounce check - prevent repeated triggers within cooldown period
+        if(millis() - last_autostart_trigger_time > AUTOSTART_TRIGGER_DEBOUNCE_MS)
         {
-          // Debounce check - prevent repeated triggers within cooldown period
-          if(millis() - last_autostart_trigger_time > AUTOSTART_TRIGGER_DEBOUNCE_MS)
+          Serial.println("BMW app heater command received!");
+          last_autostart_trigger_time = millis();
+          
+          // Trigger engine start only if not already running/starting/stopping
+          if(!engine_start && !engine_stop && !remote_started && !status_engine_running)
           {
-            Serial.println("External auto-start trigger received!");
-            last_autostart_trigger_time = millis();
-            
-            // Trigger engine start only if not already running/starting/stopping
-            if(!engine_start && !engine_stop && !remote_started && !status_engine_running)
-            {
-              Serial.println("-> Initiating auto-start");
-              engine_start = true;
-            }
-            else
-            {
-              Serial.println("-> Ignored (engine already running or in transition)");
-            }
+            Serial.println("-> Initiating auto-start");
+            engine_start = true;
           }
           else
           {
-            Serial.println("External trigger ignored (debounce)");
+            Serial.println("-> Ignored (engine already running or in transition)");
           }
+        }
+        else
+        {
+          Serial.println("BMW app trigger ignored (debounce)");
         }
       }
     }
